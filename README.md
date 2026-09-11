@@ -36,14 +36,14 @@ OPENAI_API_KEY=sk-...
 uvicorn server:app --reload
 ```
 
-Open [http://127.0.0.1:8000](http://127.0.0.1:8000), pick a voice and instructions (or one of the language presets), and click **Connect**. Grant microphone access when prompted.
+Open [http://127.0.0.1:8000](http://127.0.0.1:8000), pick a voice, tone, style, and instructions (or one of the language presets), and click **Connect**. Grant microphone access when prompted.
 
 ## Project Structure
 
 ```
 server.py           FastAPI backend: serves the UI, relays the Live WebSocket session
 static/
-  index.html         UI: voice/instructions controls, transcript, connect/disconnect
+  index.html         UI: voice/tone/style/instructions controls, transcript, connect/disconnect
   app.js             Browser client: mic capture/playback (Web Audio API), WebSocket relay, event handling
 .env.example         Template for required environment variables
 requirements.txt      Python dependencies
@@ -52,7 +52,7 @@ requirements.txt      Python dependencies
 ### How it works
 
 1. The browser (`static/app.js`) captures the microphone via `getUserMedia`, and a `ScriptProcessorNode` on a 24kHz `AudioContext` converts each chunk to base64-encoded PCM16.
-2. The browser opens a WebSocket to `/ws/session` on the FastAPI backend (`server.py`) and sends the chosen voice/instructions as its first message.
+2. The browser opens a WebSocket to `/ws/session` on the FastAPI backend (`server.py`) and sends the chosen voice/instructions as its first message. The Tone and Style dropdowns aren't sent separately — `buildInstructions()` folds them into a line prepended to the free-text instructions (e.g. `"Speak in a friendly tone with a concise style. <your instructions>"`) before it's sent.
 3. The backend opens its own WebSocket to OpenAI (`async_client.live.connect()`), holding the API key server-side, and sends `session.start` with the model, audio format, and delegation config.
 4. From there the backend purely relays: browser audio-append events go straight to OpenAI (`conn.send_raw`), and every event OpenAI sends back (transcripts, audio deltas, usage, errors) is forwarded to the browser unchanged.
 5. The browser decodes incoming `session.output_audio.delta` chunks back to PCM16 and schedules them for gapless playback via `AudioBufferSourceNode`.
