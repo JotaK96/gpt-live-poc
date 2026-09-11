@@ -1,4 +1,6 @@
 const voiceSelect = document.getElementById("voice");
+const toneSelect = document.getElementById("tone");
+const styleSelect = document.getElementById("style");
 const instructionsBox = document.getElementById("instructions");
 const connectBtn = document.getElementById("connect");
 const disconnectBtn = document.getElementById("disconnect");
@@ -49,7 +51,15 @@ function setConnectedUI(connected) {
   connectBtn.disabled = connected;
   disconnectBtn.disabled = !connected;
   voiceSelect.disabled = connected;
+  toneSelect.disabled = connected;
+  styleSelect.disabled = connected;
   instructionsBox.disabled = connected;
+}
+
+function buildInstructions() {
+  const styleLine = `Speak in a ${toneSelect.value} tone with a ${styleSelect.value} style.`;
+  const base = instructionsBox.value.trim();
+  return base ? `${styleLine} ${base}` : styleLine;
 }
 
 function base64ToBytes(b64) {
@@ -137,7 +147,7 @@ async function connect() {
     ws.send(
       JSON.stringify({
         voice: voiceSelect.value,
-        instructions: instructionsBox.value,
+        instructions: buildInstructions(),
       })
     );
   });
