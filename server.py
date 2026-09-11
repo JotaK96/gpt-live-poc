@@ -1,11 +1,13 @@
+import asyncio
+import json
 import logging
 import os
 
 from dotenv import load_dotenv
-from fastapi import FastAPI, HTTPException, Request
+from fastapi import FastAPI, HTTPException, Request, WebSocket, WebSocketDisconnect
 from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
-from openai import APIError, OpenAI
+from openai import APIError, AsyncOpenAI, OpenAI
 
 load_dotenv()
 
@@ -21,6 +23,7 @@ if not api_key:
 ALLOWED_ORIGINS = {"http://127.0.0.1:8000", "http://localhost:8000"}
 
 client = OpenAI(api_key=api_key)
+async_client = AsyncOpenAI(api_key=api_key)
 
 app = FastAPI()
 app.mount("/static", StaticFiles(directory="static"), name="static")
@@ -77,3 +80,72 @@ async def create_session(request: Request):
     if hasattr(result, "model_dump"):
         return result.model_dump()
     return result
+
+
+def _session_config(voice: str, instructions: str):
+    return {
+        "model": "gpt-live-1",
+        "instructions": instructions,
+        "audio": {
+            "format": {"type": "audio/pcm", "rate": 24000},
+            "output": {"voice": voice},
+        },
+        "delegation": {
+            "type": "responses",
+            "responses": {
+                "model": "gpt-5.6-luna",
+                "instructions": instructions,
+            },
+        },
+    }
+
+
+@app.websocket("/ws/session")
+async def ws_session(websocket: WebSocket):
+    origin = websocket.headers.get("origin")
+    if origin is not None and origin not in ALLOWED_ORIGINS:
+        await websocket.close(code=4403)
+        return
+
+    await websocket.accept()
+
+    try:
+        config_raw = await websocket.receive_text()
+        config = json.loads(config_raw)
+    except (WebSocketDisconnect, json.JSONDecodeError):
+        return
+
+    voice = config.get("voice", "marin")
+    instructions = config.get("instructions", "Be concise and friendly.")
+
+    try:
+        async with async_client.live.connect() as conn:
+            await conn.session.start(session=_session_config(voice, instructions))
+
+            async def from_browser():
+                while True:
+                    data = await websocket.receive_text()
+                    await conn.send_raw(data)
+
+            async def from_openai():
+                async for event in conn:
+                    await websocket.send_text(event.model_dump_json(by_alias=True))
+
+            forward_in = asyncio.create_task(from_browser())
+            forward_out = asyncio.create_task(from_openai())
+            try:
+                await asyncio.wait(
+                    {forward_in, forward_out}, return_when=asyncio.FIRST_COMPLETED
+                )
+            finally:
+                forward_in.cancel()
+                forward_out.cancel()
+    except WebSocketDisconnect:
+        pass
+    except APIError:
+        log.exception("Live WS session failed")
+    finally:
+        try:
+            await websocket.close()
+        except RuntimeError:
+            pass

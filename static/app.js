@@ -4,7 +4,6 @@ const connectBtn = document.getElementById("connect");
 const disconnectBtn = document.getElementById("disconnect");
 const statusEl = document.getElementById("status");
 const transcriptEl = document.getElementById("transcript");
-const remoteAudio = document.getElementById("remoteAudio");
 
 document.querySelectorAll(".langs button").forEach((btn) => {
   btn.addEventListener("click", () => {
@@ -12,9 +11,15 @@ document.querySelectorAll(".langs button").forEach((btn) => {
   });
 });
 
-let peer = null;
-let events = null;
+const SAMPLE_RATE = 24000;
+
+let ws = null;
+let audioCtx = null;
 let micStream = null;
+let micSource = null;
+let micProcessor = null;
+let nextPlayTime = 0;
+let closing = false;
 
 function setStatus(text) {
   statusEl.textContent = text;
@@ -47,10 +52,55 @@ function setConnectedUI(connected) {
   instructionsBox.disabled = connected;
 }
 
+function base64ToBytes(b64) {
+  const binary = atob(b64);
+  const bytes = new Uint8Array(binary.length);
+  for (let i = 0; i < binary.length; i++) bytes[i] = binary.charCodeAt(i);
+  return bytes;
+}
+
+function bytesToBase64(bytes) {
+  let binary = "";
+  const chunkSize = 0x8000;
+  for (let i = 0; i < bytes.length; i += chunkSize) {
+    binary += String.fromCharCode.apply(null, bytes.subarray(i, i + chunkSize));
+  }
+  return btoa(binary);
+}
+
+function playPcm16Base64(b64) {
+  const bytes = base64ToBytes(b64);
+  const samples = new Int16Array(bytes.buffer, bytes.byteOffset, bytes.length / 2);
+  const float32 = new Float32Array(samples.length);
+  for (let i = 0; i < samples.length; i++) float32[i] = samples[i] / 32768;
+
+  const buffer = audioCtx.createBuffer(1, float32.length, SAMPLE_RATE);
+  buffer.copyToChannel(float32, 0);
+
+  const source = audioCtx.createBufferSource();
+  source.buffer = buffer;
+  source.connect(audioCtx.destination);
+
+  const startAt = Math.max(nextPlayTime, audioCtx.currentTime);
+  source.start(startAt);
+  nextPlayTime = startAt + buffer.duration;
+}
+
+function encodePcm16Base64(float32Array) {
+  const int16 = new Int16Array(float32Array.length);
+  for (let i = 0; i < float32Array.length; i++) {
+    const s = Math.max(-1, Math.min(1, float32Array[i]));
+    int16[i] = s < 0 ? s * 0x8000 : s * 0x7fff;
+  }
+  return bytesToBase64(new Uint8Array(int16.buffer));
+}
+
 async function connect() {
   setStatus("Requesting mic...");
   setConnectedUI(true);
   lastSpeaker = null;
+  nextPlayTime = 0;
+  closing = false;
 
   try {
     micStream = await navigator.mediaDevices.getUserMedia({ audio: true });
@@ -60,18 +110,48 @@ async function connect() {
     return;
   }
 
-  peer = new RTCPeerConnection();
-  events = peer.createDataChannel("oai-events");
+  audioCtx = new AudioContext({ sampleRate: SAMPLE_RATE });
+  micSource = audioCtx.createMediaStreamSource(micStream);
+  // ScriptProcessorNode is deprecated but simplest for a POC; needs to be
+  // connected to a destination to be pulled, so route through a silent gain
+  // node to avoid echoing the mic back out of the speakers.
+  micProcessor = audioCtx.createScriptProcessor(4096, 1, 1);
+  const silentGain = audioCtx.createGain();
+  silentGain.gain.value = 0;
+  micSource.connect(micProcessor);
+  micProcessor.connect(silentGain);
+  silentGain.connect(audioCtx.destination);
 
-  for (const track of micStream.getAudioTracks()) {
-    peer.addTrack(track, micStream);
-  }
+  const protocol = location.protocol === "https:" ? "wss:" : "ws:";
+  ws = new WebSocket(`${protocol}//${location.host}/ws/session`);
 
-  peer.addEventListener("track", (event) => {
-    remoteAudio.srcObject = new MediaStream([event.track]);
+  micProcessor.onaudioprocess = (e) => {
+    if (ws?.readyState !== WebSocket.OPEN) return;
+    const input = e.inputBuffer.getChannelData(0);
+    const audio = encodePcm16Base64(input);
+    ws.send(JSON.stringify({ type: "session.input_audio.append", audio }));
+  };
+
+  ws.addEventListener("open", () => {
+    setStatus("Negotiating connection...");
+    ws.send(
+      JSON.stringify({
+        voice: voiceSelect.value,
+        instructions: instructionsBox.value,
+      })
+    );
   });
 
-  events.addEventListener("message", ({ data }) => {
+  ws.addEventListener("close", () => {
+    if (!closing) setStatus("Connection lost — reconnect to continue");
+    teardown();
+  });
+
+  ws.addEventListener("error", () => {
+    console.log("websocket error");
+  });
+
+  ws.addEventListener("message", ({ data }) => {
     let event;
     try {
       event = JSON.parse(data);
@@ -89,6 +169,9 @@ async function connect() {
       case "session.output_transcript.delta":
         appendDelta("Assistant", event.delta, "assistant");
         break;
+      case "session.output_audio.delta":
+        playPcm16Base64(event.delta);
+        break;
       case "session.closed":
         setStatus(`Closed (usage: ${JSON.stringify(event.usage)})`);
         break;
@@ -100,79 +183,41 @@ async function connect() {
         console.log("event", event);
     }
   });
-
-  setStatus("Negotiating connection...");
-
-  try {
-    const offer = await peer.createOffer();
-    await peer.setLocalDescription(offer);
-
-    if (peer.iceGatheringState !== "complete") {
-      await new Promise((resolve, reject) => {
-        const timeout = setTimeout(() => {
-          peer.removeEventListener("icegatheringstatechange", onState);
-          reject(new Error("Timed out while gathering ICE candidates"));
-        }, 10_000);
-        function onState() {
-          if (peer.iceGatheringState !== "complete") return;
-          clearTimeout(timeout);
-          peer.removeEventListener("icegatheringstatechange", onState);
-          resolve();
-        }
-        peer.addEventListener("icegatheringstatechange", onState);
-      });
-    }
-  } catch (err) {
-    setStatus(`Connection negotiation failed: ${err.message}`);
-    disconnect();
-    return;
-  }
-
-  try {
-    const response = await fetch("/api/session", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({
-        sdp: peer.localDescription.sdp,
-        voice: voiceSelect.value,
-        instructions: instructionsBox.value,
-      }),
-    });
-
-    if (!response.ok) {
-      const errBody = await response.json().catch(() => ({}));
-      throw new Error(errBody.detail || `HTTP ${response.status}`);
-    }
-
-    const result = await response.json();
-    await peer.setRemoteDescription({
-      type: "answer",
-      sdp: result.transport.sdp,
-    });
-  } catch (err) {
-    setStatus(`Session creation failed: ${err.message}`);
-    disconnect();
-  }
 }
 
-function disconnect() {
-  if (events?.readyState === "open") {
-    try {
-      events.send(JSON.stringify({ type: "session.close" }));
-    } catch {
-      // ignore, we're tearing down anyway
-    }
+function teardown() {
+  if (micProcessor) {
+    micProcessor.onaudioprocess = null;
+    micProcessor.disconnect();
+    micProcessor = null;
+  }
+  if (micSource) {
+    micSource.disconnect();
+    micSource = null;
+  }
+  if (audioCtx) {
+    audioCtx.close();
+    audioCtx = null;
   }
   if (micStream) {
     micStream.getTracks().forEach((t) => t.stop());
     micStream = null;
   }
-  if (peer) {
-    peer.close();
-    peer = null;
-  }
-  events = null;
+  ws = null;
   setConnectedUI(false);
+}
+
+function disconnect() {
+  closing = true;
+  if (ws?.readyState === WebSocket.OPEN) {
+    try {
+      ws.send(JSON.stringify({ type: "session.close" }));
+    } catch {
+      // ignore, we're tearing down anyway
+    }
+  }
+  if (ws) ws.close();
+  teardown();
   setStatus("Disconnected");
 }
 
