@@ -1,0 +1,71 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <title>GPT-Live 1.0 POC</title>
+  <style>
+    body { font-family: system-ui, sans-serif; max-width: 640px; margin: 40px auto; padding: 0 16px; }
+    label { display: block; margin-top: 12px; font-weight: 600; }
+    select, textarea { width: 100%; box-sizing: border-box; padding: 6px; font: inherit; }
+    textarea { height: 60px; }
+    .langs button { margin: 6px 6px 0 0; }
+    #controls { margin-top: 16px; }
+    #status { margin: 12px 0; font-weight: 600; }
+    #transcript { border: 1px solid #ccc; border-radius: 6px; padding: 12px; height: 260px; overflow-y: auto; white-space: pre-wrap; }
+    .you { color: #1a4; }
+    .assistant { color: #14a; }
+    .err { color: #c22; }
+  </style>
+</head>
+<body>
+  <h1>GPT-Live 1.0 POC</h1>
+
+  <label for="voice">Voice</label>
+  <select id="voice">
+    <option>alloy</option>
+    <option>ash</option>
+    <option>ballad</option>
+    <option>beacon</option>
+    <option>bossa</option>
+    <option>cedar</option>
+    <option>cinder</option>
+    <option>coral</option>
+    <option>delta</option>
+    <option>echo</option>
+    <option>gleam</option>
+    <option selected>marin</option>
+    <option>meridian</option>
+    <option>quartz</option>
+    <option>ripple</option>
+    <option>sage</option>
+    <option>shimmer</option>
+    <option>stone</option>
+    <option>tempo</option>
+    <option>verse</option>
+    <option>vesper</option>
+    <option>willow</option>
+  </select>
+
+  <label for="instructions">Instructions (also steers language)</label>
+  <textarea id="instructions">Be concise and friendly.</textarea>
+  <div class="langs">
+    <button data-lang="Speak English. Be concise and friendly.">English</button>
+    <button data-lang="Habla en español. Sé conciso y amable.">Spanish</button>
+    <button data-lang="Parle en français. Sois concis et amical.">French</button>
+    <button data-lang="日本語で話してください。簡潔で友好的に。">Japanese</button>
+  </div>
+
+  <div id="controls">
+    <button id="connect">Connect</button>
+    <button id="disconnect" disabled>Disconnect</button>
+  </div>
+  <div id="status">Disconnected</div>
+
+  <h3>Transcript</h3>
+  <div id="transcript"></div>
+
+  <audio id="remoteAudio" autoplay></audio>
+
+  <script src="/static/app.js"></script>
+</body>
+</html>
